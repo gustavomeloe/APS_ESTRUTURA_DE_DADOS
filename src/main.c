@@ -1,3 +1,4 @@
+
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -9,18 +10,22 @@
 
 #include "Controller/Insertion/insertionSortController.h"
 #include "Controller/TreeSort/treeSortController.h"
+#include "Controller/QuickSort/dados_controller.h"
+#include "Controller/QuickSort/quick_sort.h"
 
 static int lerInteiro(const char* mensagem, int* valor) {
     char linha[128];
     char* fim;
 
     printf("%s", mensagem);
+
     if (fgets(linha, sizeof(linha), stdin) == NULL) {
         return 0;
     }
 
     errno = 0;
     long resultado = strtol(linha, &fim, 10);
+
     while (isspace((unsigned char)*fim)) {
         fim++;
     }
@@ -39,11 +44,13 @@ static int lerTamanho(const char* mensagem, size_t* tamanho) {
     char* fim;
 
     printf("%s", mensagem);
+
     if (fgets(linha, sizeof(linha), stdin) == NULL) {
         return 0;
     }
 
     char* inicio = linha;
+
     while (isspace((unsigned char)*inicio)) {
         inicio++;
     }
@@ -74,6 +81,7 @@ static int carregarArquivo(
     size_t* tamanho
 ) {
     FILE* arquivo = fopen(caminho, "rb");
+
     if (arquivo == NULL) {
         perror("Não foi possível abrir o arquivo");
         return 0;
@@ -81,12 +89,14 @@ static int carregarArquivo(
 
     size_t capacidade = 256;
     unsigned char* buffer = malloc(capacidade);
+
     if (buffer == NULL) {
         fclose(arquivo);
         return 0;
     }
 
     int caractere;
+
     while ((caractere = fgetc(arquivo)) != EOF) {
         if (isspace((unsigned char)caractere)) {
             continue;
@@ -100,7 +110,9 @@ static int carregarArquivo(
             }
 
             capacidade *= 2;
+
             unsigned char* maior = realloc(buffer, capacidade);
+
             if (maior == NULL) {
                 free(buffer);
                 fclose(arquivo);
@@ -121,6 +133,7 @@ static int carregarArquivo(
 
     fclose(arquivo);
     *dados = buffer;
+
     return 1;
 }
 
@@ -152,8 +165,10 @@ static int gerarAleatorio(
     size_t tamanho
 ) {
     const char* numeros = "0123456789";
-    const char* letras = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    const char* misto = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const char* letras =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const char* misto =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     const char* caracteres;
 
     if (tipo == 1) {
@@ -266,6 +281,7 @@ static int executarTreeSort(void) {
         }
 
         entrada = malloc(tamanho == 0 ? 1 : tamanho);
+
         if (entrada == NULL) {
             fprintf(stderr, "Não foi possível reservar memória para os dados.\n");
             return 1;
@@ -284,6 +300,7 @@ static int executarTreeSort(void) {
     }
 
     unsigned char* saida = malloc(tamanho == 0 ? 1 : tamanho);
+
     if (saida == NULL) {
         free(entrada);
         fprintf(stderr, "Não foi possível reservar memória para a ordenação.\n");
@@ -316,6 +333,77 @@ static int executarTreeSort(void) {
 
     free(entrada);
     free(saida);
+
+    return 0;
+}
+
+static RegistroFoco* clonar_dados(
+    RegistroFoco* original,
+    int tamanho
+) {
+    if (original == NULL || tamanho <= 0) {
+        return NULL;
+    }
+
+    RegistroFoco* copia = malloc((size_t)tamanho * sizeof(RegistroFoco));
+
+    if (copia != NULL) {
+        memcpy(copia, original, (size_t)tamanho * sizeof(RegistroFoco));
+    }
+
+    return copia;
+}
+
+static int executarQuickSort(void) {
+    int total_registros = 0;
+
+    printf("\n+============================== Log ====================================+\n");
+    printf("\nIniciando leitura dos dados...\n");
+
+    RegistroFoco* dados_originais = carregar_dados_csv(
+        "src/Resource/dados_queimadas.csv",
+        &total_registros
+    );
+
+    if (dados_originais == NULL || total_registros <= 0) {
+        fprintf(stderr, "[ERRO] Falha ao carregar os dados de queimadas.\n");
+        free(dados_originais);
+        return 1;
+    }
+
+    printf("\n+================= Teste de Performance dos Algoritmos =================+\n");
+    printf("\nAlgoritmo: Quick Sort (Ryan R.)\n");
+    printf("Total de registros: %d\n", total_registros);
+
+    RegistroFoco* dados_ordenados = clonar_dados(
+        dados_originais,
+        total_registros
+    );
+
+    if (dados_ordenados == NULL) {
+        fprintf(stderr, "[ERRO] Falha ao copiar os registros.\n");
+        free(dados_originais);
+        return 1;
+    }
+
+    clock_t inicio = clock();
+
+    executar_quick_sort(dados_ordenados, total_registros);
+
+    clock_t fim = clock();
+
+    if (inicio != (clock_t)-1 && fim != (clock_t)-1) {
+        double tempo = (double)(fim - inicio) / CLOCKS_PER_SEC;
+        printf("\nTempo de ordenação: %.6f segundos\n", tempo);
+    } else {
+        printf("\nTempo de ordenação indisponível.\n");
+    }
+
+    printf("\n+========================================================================+\n");
+
+    free(dados_ordenados);
+    free(dados_originais);
+
     return 0;
 }
 
@@ -326,20 +414,25 @@ int main(void) {
             "Escolha o algoritmo:\n"
             "1 - Insertion Sort (registros de queimadas)\n"
             "2 - Tree Sort (caracteres)\n"
+            "3 - Quick Sort (registros de queimadas)\n"
             "Opção: ",
             &algoritmo)) {
         fprintf(stderr, "Opção inválida.\n");
         return 1;
     }
 
-    if (algoritmo == 1) {
-        return executarInsertionSort();
-    }
+    switch (algoritmo) {
+        case 1:
+            return executarInsertionSort();
 
-    if (algoritmo == 2) {
-        return executarTreeSort();
-    }
+        case 2:
+            return executarTreeSort();
 
-    fprintf(stderr, "Algoritmo inválido.\n");
-    return 1;
+        case 3:
+            return executarQuickSort();
+
+        default:
+            fprintf(stderr, "Algoritmo inválido.\n");
+            return 1;
+    }
 }
