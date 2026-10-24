@@ -4,15 +4,16 @@
 #include <stddef.h>
 
 typedef struct NoModel {
-    unsigned char valor;
+    float valor;
     size_t repeticoes;
     struct NoModel *esquerda;
     struct NoModel *direita;
 } NoModel;
 
-NoModel* criarNo(unsigned char valor);
-int inserir(NoModel** raiz, unsigned char valor);
-void emOrdem(const NoModel* raiz, unsigned char* saida, size_t* indice);
+NoModel* criarNo(float valor);
+void simularFalhaNaAlocacaoDoNo(size_t numeroAlocacao);
+int inserir(NoModel** raiz, float valor);
+void emOrdem(const NoModel* raiz, float* saida, size_t* indice);
 void destruirArvore(NoModel* raiz);
 
 #endif

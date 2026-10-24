@@ -1,438 +1,625 @@
-
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <float.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "Controller/Insertion/insertionSortController.h"
 #include "Controller/TreeSort/treeSortController.h"
+#include "Model/TreeSort/noModel.h"
 #include "Controller/QuickSort/dados_controller.h"
 #include "Controller/QuickSort/quick_sort.h"
 
-static int lerInteiro(const char* mensagem, int* valor) {
-    char linha[128];
-    char* fim;
+void heap_sort(float dados[], size_t tamanho);
 
-    printf("%s", mensagem);
+/* ===================================================================== */
+/*                     FUNCOES AUXILIARES DE INTERFACE                   */
+/* ===================================================================== */
 
-    if (fgets(linha, sizeof(linha), stdin) == NULL) {
-        return 0;
-    }
+#define LARGURA 103  /* largura total de cada linha, incluindo as bordas */
 
-    errno = 0;
-    long resultado = strtol(linha, &fim, 10);
+/* Separador da tabela do resumo comparativo (soma 103 colunas). */
+#define SEP "+---------------------------------+----------------+" \
+            "----------------+----------------+----------------+\n"
 
-    while (isspace((unsigned char)*fim)) {
-        fim++;
-    }
+/* Conta caracteres UTF-8 (printf conta bytes e desalinha com acentos). */
+static int larguraUtf8(const char *s) {
+    int n = 0;
 
-    if (errno != 0 || fim == linha || *fim != '\0' ||
-        resultado < INT_MIN || resultado > INT_MAX) {
-        return 0;
-    }
-
-    *valor = (int)resultado;
-    return 1;
-}
-
-static int lerTamanho(const char* mensagem, size_t* tamanho) {
-    char linha[128];
-    char* fim;
-
-    printf("%s", mensagem);
-
-    if (fgets(linha, sizeof(linha), stdin) == NULL) {
-        return 0;
-    }
-
-    char* inicio = linha;
-
-    while (isspace((unsigned char)*inicio)) {
-        inicio++;
-    }
-
-    if (*inicio == '-') {
-        return 0;
-    }
-
-    errno = 0;
-    unsigned long long resultado = strtoull(inicio, &fim, 10);
-
-    while (isspace((unsigned char)*fim)) {
-        fim++;
-    }
-
-    if (errno != 0 || fim == inicio || *fim != '\0' ||
-        resultado > SIZE_MAX) {
-        return 0;
-    }
-
-    *tamanho = (size_t)resultado;
-    return 1;
-}
-
-static int carregarArquivo(
-    const char* caminho,
-    unsigned char** dados,
-    size_t* tamanho
-) {
-    FILE* arquivo = fopen(caminho, "rb");
-
-    if (arquivo == NULL) {
-        perror("Não foi possível abrir o arquivo");
-        return 0;
-    }
-
-    size_t capacidade = 256;
-    unsigned char* buffer = malloc(capacidade);
-
-    if (buffer == NULL) {
-        fclose(arquivo);
-        return 0;
-    }
-
-    int caractere;
-
-    while ((caractere = fgetc(arquivo)) != EOF) {
-        if (isspace((unsigned char)caractere)) {
-            continue;
+    for (; *s; s++) {
+        if (((unsigned char)*s & 0xC0) != 0x80) {
+            n++;
         }
+    }
 
-        if (*tamanho == capacidade) {
-            if (capacidade > SIZE_MAX / 2) {
-                free(buffer);
-                fclose(arquivo);
-                return 0;
-            }
+    return n;
+}
 
-            capacidade *= 2;
+static void repetir(char c, int n) {
+    while (n-- > 0) {
+        putchar(c);
+    }
+}
 
-            unsigned char* maior = realloc(buffer, capacidade);
+/* +------------ Titulo ------------+ */
+static void linhaTitulo(
+    char esq,
+    char fill,
+    char dir,
+    const char *titulo
+) {
+    int livre = LARGURA - 2 - larguraUtf8(titulo) - 2;
+    int a, b;
 
-            if (maior == NULL) {
-                free(buffer);
-                fclose(arquivo);
-                return 0;
-            }
+    if (livre < 0) {
+        livre = 0;
+    }
 
-            buffer = maior;
+    a = livre / 2;
+    b = livre - a;
+
+    putchar(esq);
+    repetir(fill, a);
+    printf(" %s ", titulo);
+    repetir(fill, b);
+    putchar(dir);
+    putchar('\n');
+}
+
+/* +--------------------------------+ */
+static void linhaFechamento(char esq, char fill, char dir) {
+    putchar(esq);
+    repetir(fill, LARGURA - 2);
+    putchar(dir);
+    putchar('\n');
+}
+
+/* | texto formatado               | */
+static void linhaTexto(const char *fmt, ...) {
+    char buf[256];
+    va_list ap;
+    int pad;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+
+    pad = LARGURA - 4 - larguraUtf8(buf);
+
+    if (pad < 0) {
+        pad = 0;
+    }
+
+    printf("| %s", buf);
+    repetir(' ', pad);
+    printf(" |\n");
+}
+
+/* Celula de tabela alinhada por caracteres (nao por bytes). */
+static void celula(const char *s, int w) {
+    printf("%s", s);
+    repetir(' ', w - larguraUtf8(s));
+}
+
+/* ===================================================================== */
+/*                              BENCHMARK                                */
+/* ===================================================================== */
+
+typedef enum {
+    ALEATORIOS,
+    ORDENADOS,
+    INVERTIDOS,
+    SEMIORDENADOS
+} Cenario;
+
+typedef struct {
+    const char *nome;
+    double tempos[4];
+    int ok[4];
+} Resultado;
+
+/* Compara registros pelo risco de fogo. */
+static int compararRisco(const void *a, const void *b) {
+    float x = ((const RegistroFoco *)a)->risco_fogo;
+    float y = ((const RegistroFoco *)b)->risco_fogo;
+
+    return (x > y) - (x < y);
+}
+
+/* Verifica se os riscos estao em ordem crescente. */
+static int validarRiscos(const RegistroFoco *registros, int total) {
+    for (int i = 1; i < total; i++) {
+        if (registros[i - 1].risco_fogo >
+            registros[i].risco_fogo) {
+            return 0;
         }
-
-        buffer[(*tamanho)++] = (unsigned char)caractere;
-    }
-
-    if (ferror(arquivo)) {
-        free(buffer);
-        fclose(arquivo);
-        return 0;
-    }
-
-    fclose(arquivo);
-    *dados = buffer;
-
-    return 1;
-}
-
-static void exibirConteudo(
-    const char* rotulo,
-    const unsigned char* dados,
-    size_t tamanho
-) {
-    size_t exibidos = tamanho < 100 ? tamanho : 100;
-
-    printf("%s (%zu caracteres): ", rotulo, tamanho);
-
-    if (exibidos == 0) {
-        printf("(vazio)");
-    } else {
-        fwrite(dados, sizeof(*dados), exibidos, stdout);
-    }
-
-    if (tamanho > exibidos) {
-        printf("... [mostrando %zu de %zu]", exibidos, tamanho);
-    }
-
-    printf("\n");
-}
-
-static int gerarAleatorio(
-    int tipo,
-    unsigned char* dados,
-    size_t tamanho
-) {
-    const char* numeros = "0123456789";
-    const char* letras =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    const char* misto =
-        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    const char* caracteres;
-
-    if (tipo == 1) {
-        caracteres = numeros;
-    } else if (tipo == 2) {
-        caracteres = letras;
-    } else if (tipo == 3) {
-        caracteres = misto;
-    } else {
-        return 0;
-    }
-
-    size_t opcoes = strlen(caracteres);
-
-    for (size_t i = 0; i < tamanho; i++) {
-        dados[i] = (unsigned char)caracteres[rand() % opcoes];
     }
 
     return 1;
 }
 
-static int executarInsertionSort(void) {
-    int origem;
-    int quantidade;
-
-    if (!lerInteiro(
-            "Dados para o Insertion Sort:\n"
-            "1 - Ler dados do CSV\n"
-            "2 - Gerar dados aleatórios\n"
-            "Escolha a opção: ",
-            &origem) ||
-        (origem != 1 && origem != 2)) {
-        fprintf(stderr, "Opção inválida.\n");
-        return 1;
-    }
-
-    if (!lerInteiro(
-            "Quantidade de registros para ordenar (1 a 120000): ",
-            &quantidade) ||
-        quantidade < 1 || quantidade > 120000) {
-        fprintf(stderr, "Quantidade inválida.\n");
-        return 1;
-    }
-
-    if (origem == 1) {
-        executarInsertionSortCSV(
-            "src/Resource/dados_queimadas.csv",
-            quantidade
+/* Prepara os dados para cada cenario do benchmark. */
+static void prepararCenario(
+    RegistroFoco *dados,
+    int total,
+    Cenario cenario
+) {
+    if (cenario == ALEATORIOS) {
+        for (int i = total - 1; i > 0; i--) {
+            int j = rand() % (i + 1);
+            RegistroFoco temp = dados[i];
+            dados[i] = dados[j];
+            dados[j] = temp;
+        }
+    } else {
+        qsort(
+            dados,
+            (size_t)total,
+            sizeof(*dados),
+            compararRisco
         );
-    } else {
-        srand((unsigned int)time(NULL));
-        executarInsertionSortAleatorio(quantidade);
-    }
 
-    return 0;
+        if (cenario == INVERTIDOS) {
+            for (int i = 0; i < total / 2; i++) {
+                RegistroFoco temp = dados[i];
+                dados[i] = dados[total - 1 - i];
+                dados[total - 1 - i] = temp;
+            }
+        } else if (cenario == SEMIORDENADOS) {
+            int trocas = total / 5;
+
+            for (int i = 0; i < trocas; i++) {
+                int a = rand() % total;
+                int b = rand() % total;
+                RegistroFoco temp = dados[a];
+                dados[a] = dados[b];
+                dados[b] = temp;
+            }
+        }
+    }
 }
 
-static int executarTreeSort(void) {
-    int origem;
+/* Simulacao controlada de falha de alocacao. */
+static int falharProximaAlocacaoBuffer = 0;
 
-    if (!lerInteiro(
-            "Dados para o Tree Sort:\n"
-            "1 - Carregar arquivo txt\n"
-            "2 - Gerar aleatoriamente\n"
-            "Opção: ",
-            &origem)) {
-        fprintf(stderr, "Opção inválida.\n");
-        return 1;
-    }
-
-    unsigned char* entrada = NULL;
-    size_t tamanho = 0;
-
-    if (origem == 1) {
-        char caminho[1024];
-
-        printf("Caminho do arquivo txt: ");
-
-        if (fgets(caminho, sizeof(caminho), stdin) == NULL) {
-            fprintf(stderr, "Não foi possível ler o caminho.\n");
-            return 1;
-        }
-
-        caminho[strcspn(caminho, "\r\n")] = '\0';
-
-        if (!carregarArquivo(caminho, &entrada, &tamanho)) {
-            fprintf(stderr, "Falha ao ler o arquivo.\n");
-            return 1;
-        }
-
-        printf("Espaços e quebras de linha do arquivo serão ignorados.\n");
-    } else if (origem == 2) {
-        int tipo;
-
-        if (!lerInteiro(
-                "Tipo de conteúdo aleatório:\n"
-                "1 - Números\n"
-                "2 - Letras\n"
-                "3 - Misturado\n"
-                "Opção: ",
-                &tipo) ||
-            tipo < 1 || tipo > 3) {
-            fprintf(stderr, "Tipo inválido.\n");
-            return 1;
-        }
-
-        if (!lerTamanho("Quantidade de caracteres: ", &tamanho)) {
-            fprintf(stderr, "Quantidade inválida.\n");
-            return 1;
-        }
-
-        entrada = malloc(tamanho == 0 ? 1 : tamanho);
-
-        if (entrada == NULL) {
-            fprintf(stderr, "Não foi possível reservar memória para os dados.\n");
-            return 1;
-        }
-
-        srand((unsigned int)time(NULL));
-
-        if (!gerarAleatorio(tipo, entrada, tamanho)) {
-            free(entrada);
-            fprintf(stderr, "Não foi possível gerar os dados.\n");
-            return 1;
-        }
-    } else {
-        fprintf(stderr, "Origem inválida.\n");
-        return 1;
-    }
-
-    unsigned char* saida = malloc(tamanho == 0 ? 1 : tamanho);
-
-    if (saida == NULL) {
-        free(entrada);
-        fprintf(stderr, "Não foi possível reservar memória para a ordenação.\n");
-        return 1;
-    }
-
-    exibirConteudo("Antes", entrada, tamanho);
-
-    clock_t inicio = clock();
-    int sucesso = ordenarComArvore(entrada, tamanho, saida);
-    clock_t fim = clock();
-
-    if (!sucesso) {
-        free(entrada);
-        free(saida);
-        fprintf(stderr, "Não foi possível ordenar os dados.\n");
-        return 1;
-    }
-
-    exibirConteudo("Depois", saida, tamanho);
-
-    if (inicio != (clock_t)-1 && fim != (clock_t)-1) {
-        printf(
-            "Tempo de ordenação: %.3f ms\n",
-            1000.0 * (double)(fim - inicio) / CLOCKS_PER_SEC
-        );
-    } else {
-        printf("Tempo de ordenação indisponível.\n");
-    }
-
-    free(entrada);
-    free(saida);
-
-    return 0;
+static void simularFalhaProximaAlocacaoBuffer(void) {
+    falharProximaAlocacaoBuffer = 1;
 }
 
-static RegistroFoco* clonar_dados(
-    RegistroFoco* original,
-    int tamanho
-) {
-    if (original == NULL || tamanho <= 0) {
+static void *alocarBufferBenchmark(size_t tamanho) {
+    if (falharProximaAlocacaoBuffer) {
+        falharProximaAlocacaoBuffer = 0;
         return NULL;
     }
 
-    RegistroFoco* copia = malloc((size_t)tamanho * sizeof(RegistroFoco));
-
-    if (copia != NULL) {
-        memcpy(copia, original, (size_t)tamanho * sizeof(RegistroFoco));
-    }
-
-    return copia;
+    return malloc(tamanho);
 }
 
-static int executarQuickSort(void) {
-    int total_registros = 0;
+/* Testa o tratamento de falha na alocacao de um buffer. */
+static int testarFalhaBuffer(const char *algoritmo) {
+    simularFalhaProximaAlocacaoBuffer();
 
-    printf("\n+============================== Log ====================================+\n");
-    printf("\nIniciando leitura dos dados...\n");
+    void *buffer = alocarBufferBenchmark(sizeof(RegistroFoco));
 
-    RegistroFoco* dados_originais = carregar_dados_csv(
-        "src/Resource/dados_queimadas.csv",
-        &total_registros
-    );
-
-    if (dados_originais == NULL || total_registros <= 0) {
-        fprintf(stderr, "[ERRO] Falha ao carregar os dados de queimadas.\n");
-        free(dados_originais);
+    if (buffer == NULL) {
+        linhaTexto(
+            "%-20s | buffer NULL reconhecido; "
+            "Algoritmo interrompido",
+            algoritmo
+        );
         return 1;
     }
 
-    printf("\n+================= Teste de Performance dos Algoritmos =================+\n");
-    printf("\nAlgoritmo: Quick Sort (Ryan R.)\n");
-    printf("Total de registros: %d\n", total_registros);
+    free(buffer);
 
-    RegistroFoco* dados_ordenados = clonar_dados(
-        dados_originais,
-        total_registros
+    linhaTexto(
+        "%-20s | ERRO: falha de buffer não detectada",
+        algoritmo
     );
 
-    if (dados_ordenados == NULL) {
-        fprintf(stderr, "[ERRO] Falha ao copiar os registros.\n");
-        free(dados_originais);
+    return 0;
+}
+
+/* Testa falha de alocacao de um no da Tree Sort. */
+static int testarFalhaInternaTreeSort(void) {
+    const float entrada[] = {2.0f, 1.0f, 3.0f};
+    float saida[3];
+
+    simularFalhaNaAlocacaoDoNo(2);
+
+    int sucesso = ordenarRiscosComArvore(
+        entrada,
+        3,
+        saida
+    );
+
+    if (!sucesso) {
+        linhaTexto(
+            "%-20s | falha interna detectada; "
+            "árvore parcial liberada",
+            "Tree Sort (nó)"
+        );
+
         return 1;
     }
 
-    clock_t inicio = clock();
+    linhaTexto(
+        "%-20s | ERRO: ordenação continuou após falha de nó",
+        "Tree Sort (nó)"
+    );
 
-    executar_quick_sort(dados_ordenados, total_registros);
+    return 0;
+}
 
-    clock_t fim = clock();
+/* Carrega o CSV sem deixar o controller imprimir mensagens proprias
+   (evita o "Carregando ... registos" duplicado). Erros em stderr
+   continuam aparecendo normalmente. */
+static RegistroFoco *carregarCsvSilencioso(const char *caminho, int *total) {
+    RegistroFoco *dados;
 
-    if (inicio != (clock_t)-1 && fim != (clock_t)-1) {
-        double tempo = (double)(fim - inicio) / CLOCKS_PER_SEC;
-        printf("\nTempo de ordenação: %.6f segundos\n", tempo);
+    fflush(stdout);
+
+    int salvo = dup(STDOUT_FILENO);
+    int nulo = open("/dev/null", O_WRONLY);
+
+    if (salvo >= 0 && nulo >= 0) {
+        dup2(nulo, STDOUT_FILENO);
+    }
+
+    if (nulo >= 0) {
+        close(nulo);
+    }
+
+    dados = carregar_dados_csv(caminho, total);
+
+    fflush(stdout);
+
+    if (salvo >= 0) {
+        dup2(salvo, STDOUT_FILENO);
+        close(salvo);
+    }
+
+    return dados;
+}
+
+/* Executa o benchmark completo. */
+static int executarBenchmark(int aleatorio) {
+    int total = 0;
+
+    printf("\n");
+    linhaTitulo('=', '=', '=', "BENCHMARK | ALGORITMOS DE ORDENAÇÃO");
+    printf("Iniciando leitura dos dados...\n");
+
+    RegistroFoco *originais = NULL;
+
+    if (!aleatorio) {
+        originais = carregarCsvSilencioso(
+            "src/Resource/dados_queimadas.csv",
+            &total
+        );
     } else {
-        printf("\nTempo de ordenação indisponível.\n");
+        total = 12000;
+        originais = calloc((size_t)total, sizeof(*originais));
+
+        if (originais != NULL) {
+            for (int i = 0; i < total; i++) {
+                originais[i].risco_fogo =
+                    (float)rand() / (float)RAND_MAX;
+            }
+        }
     }
 
-    printf("\n+========================================================================+\n");
+    if (originais == NULL || total <= 0) {
+        fprintf(stderr, "[ERRO] Falha ao carregar/gerar dados.\n");
+        free(originais);
+        return 1;
+    }
 
-    free(dados_ordenados);
-    free(dados_originais);
+    printf("Carregando %d registros na memória.\n", total);
+
+    const char *cenarios[] = {
+        "Dados não ordenados",
+        "Dados ordenados",
+        "Dados invertidos",
+        "Dados semi-ordenados (80% ordenado + 20% aleatório)"
+    };
+
+    Resultado resultados[4] = {
+        {"Quick Sort (Ryan R.)", {0}, {0}},
+        {"Tree Sort (Tiago)", {0}, {0}},
+        {"Heap Sort (Lucas)", {0}, {0}},
+        {"Insertion Sort (Gustavo M.)", {0}, {0}}
+    };
+
+    for (int c = 0; c < 4; c++) {
+        RegistroFoco *base = malloc(
+            (size_t)total * sizeof(*base)
+        );
+
+        if (base == NULL) {
+            printf(
+                "Falha de memória ao criar cenário: %s\n",
+                cenarios[c]
+            );
+            continue;
+        }
+
+        memcpy(base, originais, (size_t)total * sizeof(*base));
+        prepararCenario(base, total, (Cenario)c);
+
+        for (int alg = 0; alg < 4; alg++) {
+            RegistroFoco *copia = alocarBufferBenchmark(
+                (size_t)total * sizeof(*copia)
+            );
+
+            float *valores = NULL;
+
+            if (copia == NULL) {
+                resultados[alg].ok[c] = 0;
+                continue;
+            }
+
+            memcpy(copia, base, (size_t)total * sizeof(*copia));
+
+            int ok = 1;
+            clock_t inicio = clock();
+
+            if (alg == 0) {
+                executar_quick_sort(copia, total);
+            } else if (alg == 1) {
+                float *entrada = alocarBufferBenchmark(
+                    (size_t)total * sizeof(*entrada)
+                );
+                float *saida = alocarBufferBenchmark(
+                    (size_t)total * sizeof(*saida)
+                );
+
+                if (entrada != NULL && saida != NULL) {
+                    for (int i = 0; i < total; i++) {
+                        entrada[i] = copia[i].risco_fogo;
+                    }
+
+                    ok = ordenarRiscosComArvore(
+                        entrada,
+                        (size_t)total,
+                        saida
+                    );
+
+                    for (int i = 1; i < total && ok; i++) {
+                        if (saida[i - 1] > saida[i]) {
+                            ok = 0;
+                        }
+                    }
+                } else {
+                    ok = 0;
+                }
+
+                free(entrada);
+                free(saida);
+            } else if (alg == 2) {
+                valores = alocarBufferBenchmark(
+                    (size_t)total * sizeof(*valores)
+                );
+
+                if (valores != NULL) {
+                    for (int i = 0; i < total; i++) {
+                        valores[i] = copia[i].risco_fogo;
+                    }
+
+                    heap_sort(valores, (size_t)total);
+                } else {
+                    ok = 0;
+                }
+            } else {
+                for (int i = 1; i < total; i++) {
+                    RegistroFoco chave = copia[i];
+                    int j = i - 1;
+
+                    while (
+                        j >= 0 &&
+                        copia[j].risco_fogo > chave.risco_fogo
+                    ) {
+                        copia[j + 1] = copia[j];
+                        j--;
+                    }
+
+                    copia[j + 1] = chave;
+                }
+            }
+
+            clock_t fim = clock();
+
+            if (alg == 0 || alg == 3) {
+                ok = validarRiscos(copia, total);
+            }
+
+            if (alg == 2 && valores != NULL) {
+                for (int i = 1; i < total; i++) {
+                    if (valores[i - 1] > valores[i]) {
+                        ok = 0;
+                    }
+                }
+            }
+
+            resultados[alg].tempos[c] =
+                (double)(fim - inicio) / CLOCKS_PER_SEC;
+
+            resultados[alg].ok[c] = ok;
+
+            free(valores);
+            free(copia);
+        }
+
+        free(base);
+    }
+
+    /* ---------------- Quadros individuais dos algoritmos ------------- */
+    for (int alg = 0; alg < 4; alg++) {
+        char titulo[100];
+        snprintf(titulo, sizeof titulo, "Algoritmo: %s", resultados[alg].nome);
+
+        printf("\n");
+        linhaTitulo('+', '-', '+', titulo);
+        linhaTexto("Total de registros: %d", total);
+        linhaTexto("%s", "");
+
+        const char *nomesCenario[4] = {
+            "Dados não ordenados",
+            "Dados ordenados",
+            "Dados invertidos (ordem decrescente)",
+            "Dados semi-ordenados (80% ordenado + 20% aleatório)"
+        };
+
+        for (int c = 0; c < 4; c++) {
+
+            linhaTexto("%s", nomesCenario[c]);
+            linhaTexto(
+                "  Tempo de ordenação: %.6f segundos",
+                resultados[alg].tempos[c]
+            );
+
+            if (c < 3) {
+                linhaTexto("%s", "");
+            }
+        }
+
+        linhaFechamento('+', '-', '+');
+    }
+
+    /* ----------------------- Resumo comparativo ---------------------- */
+    printf("\n");
+    linhaTitulo('=', '=', '=', "RESUMO COMPARATIVO");
+
+    printf("| "); celula("Algoritmo", 31);
+    printf(" | "); celula("Não ordenados", 14);
+    printf(" | "); celula("Ordenados", 14);
+    printf(" | "); celula("Invertidos", 14);
+    printf(" | "); celula("Semi-ordenados", 14);
+    printf(" |\n");
+    printf(SEP);
+
+    for (int alg = 0; alg < 4; alg++) {
+        printf(
+            "| %-31s | %12.6f s | %12.6f s | %12.6f s | %12.6f s |\n",
+            resultados[alg].nome,
+            resultados[alg].tempos[0],
+            resultados[alg].tempos[1],
+            resultados[alg].tempos[2],
+            resultados[alg].tempos[3]
+        );
+    }
+
+    printf(SEP);
+
+    /* ------------------------- Ranking geral ------------------------- */
+    /* Soma dos tempos dos quatro cenarios (aleatorio, ordenado, invertido
+       e semiordenado). Menor soma = melhor desempenho geral. */
+    int indices[4] = {0, 1, 2, 3};
+    double totais[4];
+
+    for (int i = 0; i < 4; i++) {
+        const int cen[4] = {ALEATORIOS, ORDENADOS, INVERTIDOS, SEMIORDENADOS};
+        double soma = 0.0;
+        int valido = 1;
+
+        for (int k = 0; k < 4; k++) {
+            if (!resultados[i].ok[cen[k]]) {
+                valido = 0;
+                break;
+            }
+
+            soma += resultados[i].tempos[cen[k]];
+        }
+
+        totais[i] = valido ? soma : DBL_MAX;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        for (int j = i + 1; j < 4; j++) {
+            if (totais[indices[j]] < totais[indices[i]]) {
+                int temp = indices[i];
+                indices[i] = indices[j];
+                indices[j] = temp;
+            }
+        }
+    }
+
+    printf("\n");
+    linhaTitulo('+', '-', '+', "RANKING DOS ALGORITMOS");
+
+    /* indices[] ja esta ordenado do mais rapido para o mais lento. */
+    for (int i = 0; i < 4; i++) {
+        int ind = indices[i];
+        const char *obs = (i == 0) ? "(mais rápido)"
+                        : (i == 3) ? "(mais lento)" : "";
+
+        if (totais[ind] == DBL_MAX) {
+            linhaTexto(
+                "%d. %-27s - sem resultados válidos",
+                i + 1,
+                resultados[ind].nome
+            );
+        } else {
+            linhaTexto(
+                "%d. %-27s - Total: %.6f s %s",
+                i + 1,
+                resultados[ind].nome,
+                totais[ind],
+                obs
+            );
+        }
+    }
+
+    linhaFechamento('+', '-', '+');
+
+    /* ------------------ Testes de falha de memoria ------------------- */
+    printf("\n");
+    linhaTitulo('+', '-', '+', "TESTES DE FALHA DE MEMÓRIA");
+
+    testarFalhaBuffer("Quick Sort");
+    testarFalhaBuffer("Tree Sort");
+    testarFalhaBuffer("Heap Sort");
+    testarFalhaBuffer("Insertion Sort");
+    testarFalhaInternaTreeSort();
+
+    linhaFechamento('+', '-', '+');
+
+    free(originais);
+
+    printf("\n");
+    linhaTitulo('+', '=', '+', "Fim do teste de performance");
 
     return 0;
 }
 
 int main(void) {
-    int algoritmo;
+    int opcao;
 
-    if (!lerInteiro(
-            "Escolha o algoritmo:\n"
-            "1 - Insertion Sort (registros de queimadas)\n"
-            "2 - Tree Sort (caracteres)\n"
-            "3 - Quick Sort (registros de queimadas)\n"
-            "Opção: ",
-            &algoritmo)) {
-        fprintf(stderr, "Opção inválida.\n");
+    srand((unsigned int)time(NULL));
+
+    printf("\n");
+    linhaTitulo('=', '=', '=', "SISTEMA DE BENCHMARK DE ORDENAÇÃO");
+    printf("1 - Utilizar dados do arquivo CSV\n");
+    printf("2 - Utilizar dados Aleatórios\n");
+    linhaFechamento('=', '=', '=');
+    printf("Escolha uma opção: ");
+
+    if (scanf("%d", &opcao) != 1) {
+        printf("Opção inválida.\n");
         return 1;
     }
 
-    switch (algoritmo) {
-        case 1:
-            return executarInsertionSort();
-
-        case 2:
-            return executarTreeSort();
-
-        case 3:
-            return executarQuickSort();
-
-        default:
-            fprintf(stderr, "Algoritmo inválido.\n");
-            return 1;
+    if (opcao != 1 && opcao != 2) {
+        printf("Opção inválida.\n");
+        return 1;
     }
+
+    return executarBenchmark(opcao == 2);
 }

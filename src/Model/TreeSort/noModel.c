@@ -2,7 +2,23 @@
 #include <stdlib.h>
 #include "noModel.h"
 
-NoModel* criarNo(unsigned char valor) {
+/* Usado somente pelo teste controlado de falha de memoria. Zero desativa. */
+static size_t falharNaAlocacaoDoNo = 0;
+static size_t contadorAlocacaoNo = 0;
+
+void simularFalhaNaAlocacaoDoNo(size_t numeroAlocacao) {
+    falharNaAlocacaoDoNo = numeroAlocacao;
+    contadorAlocacaoNo = 0;
+}
+
+NoModel* criarNo(float valor) {
+    contadorAlocacaoNo++;
+    if (falharNaAlocacaoDoNo != 0 &&
+        contadorAlocacaoNo == falharNaAlocacaoDoNo) {
+        falharNaAlocacaoDoNo = 0;
+        return NULL;
+    }
+
     NoModel* novo = malloc(sizeof(NoModel));
     if (novo == NULL) {
         return NULL;
@@ -16,7 +32,7 @@ NoModel* criarNo(unsigned char valor) {
     return novo;
 }
 
-int inserir(NoModel** raiz, unsigned char valor) {
+int inserir(NoModel** raiz, float valor) {
     if (*raiz == NULL) {
         *raiz = criarNo(valor);
         return *raiz != NULL;
@@ -33,7 +49,7 @@ int inserir(NoModel** raiz, unsigned char valor) {
     return 1;
 }
 
-void emOrdem(const NoModel* raiz, unsigned char* saida, size_t* indice) {
+void emOrdem(const NoModel* raiz, float* saida, size_t* indice) {
     if (raiz != NULL) {
         emOrdem(raiz->esquerda, saida, indice);
         for (size_t i = 0; i < raiz->repeticoes; i++) {
